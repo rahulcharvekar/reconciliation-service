@@ -1,0 +1,479 @@
+
+    package com.example.paymentreconciliation.service;
+
+import com.example.paymentreconciliation.utilities.logger.LoggerFactoryProvider;
+import org.slf4j.Logger;
+
+import java.io.File;
+import java.util.List;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.UUID;
+
+/**
+ * MT940 Ingestion Service
+ * Implements the processing logic as per the design spec (see mt_940_ingestion_spec.md).
+ */
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import com.example.paymentreconciliation.config.Mt940IngestionProperties;
+
+import com.example.paymentreconciliation.entity.*;
+import com.example.paymentreconciliation.repository.*;
+
+@Service
+public class Mt940IngestionService {
+    private static final Logger log = LoggerFactoryProvider.getLogger(Mt940IngestionService.class);
+    @Autowired
+    private BankAccountRepository bankAccountRepository;
+    @Autowired
+    private ImportRunRepository importRunRepository;
+    @Autowired
+    private StatementFileRepository statementFileRepository;
+    @Autowired
+    private StatementBalanceRepository statementBalanceRepository;
+    @Autowired
+    private StatementTransactionRepository statementTransactionRepository;
+
+    @Autowired
+    private RawStatementLineRepository rawStatementLineRepository;
+    @Autowired
+    private Transaction86SegmentRepository transaction86SegmentRepository;
+
+    @Autowired
+    private Mt940IngestionProperties mt940Props;
+
+    private static final long MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+    private static final int FILE_STABILITY_WINDOW_SEC = 10;
+
+    /**
+     * Main entry point for polling and processing files.
+     */
+    public void pollAndProcessInbox() {
+        log.info("Polling MT940 inbox directory: {}", mt940Props.getInboxDir());
+        List<File> files = discoverStableFiles(mt940Props.getInboxDir());
+        log.info("Discovered {} stable file(s) for ingestion", files.size());
+        for (File file : files) {
+            try {
+                log.info("Processing file: {}", file.getAbsolutePath());
+                processFile(file);
+            } catch (Exception e) {
+                log.error("Error processing file: {}. Moving to quarantine. Error: {}", file.getAbsolutePath(), e.getMessage(), e);
+                moveToQuarantine(file, "Unhandled error: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Discover files that are stable (not changing) for at least FILE_STABILITY_WINDOW_SEC.
+     */
+    private List<File> discoverStableFiles(String inboxDir) {
+        log.debug("Discovering stable files in inbox: {}", inboxDir);
+        // Poll directory, check file size unchanged for 10s, filter by extension
+        File dir = new File(inboxDir);
+        File[] files = dir.listFiles((d, name) -> name.endsWith(".mt940") || name.endsWith(".sta") || name.endsWith(".zip"));
+        if (files == null) {
+            log.debug("No files found in inbox directory: {}", inboxDir);
+            return List.of();
+        }
+        List<File> stable = new ArrayList<>();
+        for (File f : files) {
+            long size1 = f.length();
+            try { Thread.sleep(FILE_STABILITY_WINDOW_SEC * 1000L); } catch (InterruptedException ignored) {}
+            long size2 = f.length();
+            if (size1 == size2) {
+                log.debug("File is stable: {} (size: {} bytes)", f.getName(), size1);
+                stable.add(f);
+            } else {
+                log.debug("File is not stable (size changed): {} ({} -> {} bytes)", f.getName(), size1, size2);
+            }
+        }
+        return stable;
+    }
+
+    /**
+     * Process a single file: move, hash, decompress, parse, validate, persist, archive/quarantine.
+     */
+    private void processFile(File file) {
+        log.info("Starting processing for file: {}", file.getAbsolutePath());
+        // 1. Move file to PROCESSING with GUID suffix
+    File processingFile = moveToProcessing(file);
+    log.debug("Moved file to processing: {}", processingFile.getAbsolutePath());
+        if (processingFile.length() > MAX_FILE_SIZE_BYTES) {
+            log.warn("File exceeds max size policy ({} bytes): {}", processingFile.length(), processingFile.getAbsolutePath());
+            moveToQuarantine(processingFile, "File exceeds max size policy");
+            return;
+        }
+
+        // 2. Compute sha256 and size, check for duplicates
+    String fileHash = computeSha256(processingFile);
+    log.debug("Computed SHA-256 hash for file {}: {}", processingFile.getName(), fileHash);
+        long fileSize = processingFile.length();
+        if (isDuplicate(fileHash)) {
+            log.warn("Duplicate file detected: {} (hash={})", processingFile.getName(), fileHash);
+            moveToArchive(processingFile);
+            return;
+        }
+
+        // 3. Decompress if needed
+    List<File> mt940Files = decompressIfNeeded(processingFile);
+    log.debug("Decompressed/collected {} MT940 file(s) from: {}", mt940Files.size(), processingFile.getName());
+
+        // 4. For each MT940 document: parse, validate, persist (one DB transaction per file)
+        boolean allSuccess = true;
+        for (File mt940 : mt940Files) {
+            try {
+                log.info("Parsing and persisting MT940 file: {}", mt940.getAbsolutePath());
+                parseValidatePersist(mt940, fileHash, fileSize);
+            } catch (Exception e) {
+                allSuccess = false;
+                log.error("Error parsing/persisting MT940 file: {}. Error: {}", mt940.getAbsolutePath(), e.getMessage(), e);
+                persistImportError(fileHash, mt940.getName(), e.getMessage());
+            }
+        }
+
+        // 5. On success: move original to ARCHIVE/YYYY/MM/DD
+        // 6. On failure: move to QUARANTINE and persist error details
+        if (allSuccess) {
+            log.info("Successfully processed file: {}. Moving to archive.", processingFile.getAbsolutePath());
+            moveToArchive(processingFile);
+        } else {
+            log.warn("Processing failed for file: {}. Moving to quarantine.", processingFile.getAbsolutePath());
+            moveToQuarantine(processingFile, "One or more statements failed to import");
+        }
+    }
+
+    /**
+     * Move file from INBOX to PROCESSING with a GUID suffix to avoid collisions.
+     */
+    private File moveToProcessing(File file) {
+        log.debug("Moving file to processing directory: {}", file.getAbsolutePath());
+        String guid = UUID.randomUUID().toString();
+        String newName = file.getName() + "_" + guid;
+        File dest = new File(mt940Props.getProcessingDir(), newName);
+        try {
+            Files.move(file.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to move file to processing: " + file.getAbsolutePath(), e);
+        }
+        return dest;
+    }
+
+    /**
+     * Compute SHA-256 hash of the file.
+     */
+    private String computeSha256(File file) {
+        log.debug("Computing SHA-256 for file: {}", file.getAbsolutePath());
+        try (java.io.InputStream fis = new java.io.FileInputStream(file)) {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = fis.read(buffer)) > 0) {
+                digest.update(buffer, 0, n);
+            }
+            byte[] hashBytes = digest.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hashBytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to compute SHA-256 for file: " + file.getAbsolutePath(), e);
+        }
+    }
+
+    /**
+     * Check DB for existing file hash (stubbed to always return false).
+     * Replace with actual DB lookup for import_run.file_hash.
+     */
+    private boolean isDuplicate(String fileHash) {
+        log.debug("Checking for duplicate file hash: {}", fileHash);
+        // TODO: Implement DB check for import_run.file_hash
+        return false;
+    }
+
+    /**
+     * If file is a .zip, extract to temp subfolder under PROCESSING, return list of .mt940/.sta files.
+     */
+    private List<File> decompressIfNeeded(File file) {
+        log.debug("Checking if file needs decompression: {}", file.getAbsolutePath());
+        String name = file.getName().toLowerCase();
+        if (name.endsWith(".zip")) {
+            File tempDir = new File(mt940Props.getProcessingDir(), "tmp_" + System.currentTimeMillis());
+            if (!tempDir.mkdirs()) {
+                throw new RuntimeException("Failed to create temp dir: " + tempDir.getAbsolutePath());
+            }
+            List<File> extracted = new ArrayList<>();
+            try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(new java.io.FileInputStream(file))) {
+                java.util.zip.ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    String entryName = entry.getName();
+                    if (entry.isDirectory()) continue;
+                    if (!(entryName.endsWith(".mt940") || entryName.endsWith(".sta"))) continue;
+                    File outFile = new File(tempDir, new File(entryName).getName());
+                    try (java.io.FileOutputStream fos = new java.io.FileOutputStream(outFile)) {
+                        byte[] buffer = new byte[8192];
+                        int len;
+                        while ((len = zis.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
+                        }
+                    }
+                    extracted.add(outFile);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to decompress zip: " + file.getAbsolutePath(), e);
+            }
+            if (extracted.isEmpty()) {
+                throw new RuntimeException("No MT940/STA files found in zip: " + file.getName());
+            }
+            return extracted;
+        } else {
+            return List.of(file);
+        }
+    }
+
+    /**
+     * Parse, validate, and persist all statements/transactions in a DB transaction.
+     * This is a stub: actual parsing/validation logic should be implemented as per spec.
+     */
+    private void parseValidatePersist(File mt940File, String fileHash, long fileSize) {
+        log.debug("Parsing and validating MT940 file: {}", mt940File.getAbsolutePath());
+        Mt940Parser parser = new Mt940Parser();
+        List<Mt940Parser.Statement> statements;
+        try {
+            statements = parser.parse(mt940File);
+        } catch (Mt940Parser.Mt940ParseException e) {
+            throw new RuntimeException("MT940 parse error: " + e.getMessage(), e);
+        }
+        persistParsedStatements(statements, mt940File.getName(), fileHash, fileSize);
+    }
+
+    @Transactional
+    public void persistParsedStatements(List<Mt940Parser.Statement> statements, String filename, String fileHash, long fileSize) {
+        log.info("Persisting parsed statements for file: {} (hash={})", filename, fileHash);
+        // 1. Create ImportRun
+        ImportRun importRun = new ImportRun();
+        importRun.setFilename(filename);
+        importRun.setFileHash(fileHash);
+        importRun.setFileSizeBytes(fileSize);
+        importRun.setReceivedAt(java.time.LocalDateTime.now());
+        importRun.setStatus(ImportRun.Status.PARSED);
+        importRunRepository.save(importRun);
+
+        for (Mt940Parser.Statement stmt : statements) {
+            // Validation: accountNo, currency, balances, transactions
+            if (stmt.accountNo == null || stmt.accountNo.trim().isEmpty()) {
+                log.error("Statement missing account number. Skipping statement: {}", stmt);
+                persistImportError(fileHash, filename, "Missing account number in statement: " + stmt);
+                continue;
+            }
+            if (stmt.currency == null || stmt.currency.trim().isEmpty()) {
+                log.error("Statement missing currency. Skipping statement: {}", stmt);
+                persistImportError(fileHash, filename, "Missing currency in statement: " + stmt);
+                continue;
+            }
+            if (stmt.openingBalance == null || stmt.closingBalance == null) {
+                log.error("Statement missing opening/closing balance. Skipping statement: {}", stmt);
+                persistImportError(fileHash, filename, "Missing opening/closing balance in statement: " + stmt);
+                continue;
+            }
+            if (stmt.openingBalance.amount == null || stmt.closingBalance.amount == null) {
+                log.error("Statement missing opening/closing balance amount. Skipping statement: {}", stmt);
+                persistImportError(fileHash, filename, "Missing opening/closing balance amount in statement: " + stmt);
+                continue;
+            }
+            if (stmt.transactions == null || stmt.transactions.isEmpty()) {
+                log.error("Statement missing transactions. Skipping statement: {}", stmt);
+                persistImportError(fileHash, filename, "Missing transactions in statement: " + stmt);
+                continue;
+            }
+
+            // 2. Find or create BankAccount
+            log.debug("Finding or creating BankAccount for accountNo={}, currency={}", stmt.accountNo, stmt.currency);
+            BankAccount acct = bankAccountRepository.findByAccountNoAndCurrency(stmt.accountNo, stmt.currency)
+                .orElseGet(() -> {
+                    BankAccount ba = new BankAccount();
+                    ba.setAccountNo(stmt.accountNo);
+                    ba.setCurrency(stmt.currency);
+                    ba.setIsActive(true);
+                    return bankAccountRepository.save(ba);
+                });
+
+            // 3. Validate currency match
+            if (!stmt.openingBalance.currency.equals(stmt.currency) || !stmt.closingBalance.currency.equals(stmt.currency)) {
+                log.error("Currency mismatch in statement: {}", stmt.stmtRef20);
+                persistImportError(fileHash, filename, "Currency mismatch in statement: " + stmt.stmtRef20);
+                continue;
+            }
+
+            // 4. Validate opening + sum(signed transactions) == closing (allow small rounding delta)
+            java.math.BigDecimal opening = new java.math.BigDecimal(stmt.openingBalance.amount.replace(",", "."));
+            java.math.BigDecimal closing = new java.math.BigDecimal(stmt.closingBalance.amount.replace(",", "."));
+            java.math.BigDecimal sumTxns = java.math.BigDecimal.ZERO;
+            for (Mt940Parser.Transaction txn : stmt.transactions) {
+                sumTxns = sumTxns.add(new java.math.BigDecimal(txn.signedAmount.replace(",", ".")));
+            }
+            java.math.BigDecimal expectedClosing = opening.add(sumTxns);
+            if (expectedClosing.subtract(closing).abs().compareTo(new java.math.BigDecimal("0.02")) > 0) {
+                log.error("Opening + sum(transactions) != closing for statement: {}", stmt.stmtRef20);
+                persistImportError(fileHash, filename, "Opening + sum(transactions) != closing for statement: " + stmt.stmtRef20);
+                continue;
+            }
+
+            // 5. Create StatementFile
+            StatementFile sf = new StatementFile();
+            sf.setImportRun(importRun);
+            sf.setBankAccount(acct);
+            sf.setStmtRef20(stmt.stmtRef20);
+            sf.setSeq28c(stmt.seq28c);
+            sf.setStatementDate(java.time.LocalDate.now()); // You may want to parse actual date
+            sf.setOpeningDc(stmt.openingBalance.dc);
+            sf.setOpeningAmount(opening);
+            sf.setClosingDc(stmt.closingBalance.dc);
+            sf.setClosingAmount(closing);
+            sf.setCurrency(stmt.currency);
+            sf.setIsInterim(stmt.isInterim);
+            sf.setCreatedAt(java.time.LocalDateTime.now());
+            statementFileRepository.save(sf);
+
+            // 6. Persist balances
+            StatementBalance ob = new StatementBalance();
+            ob.setStatementFile(sf);
+            ob.setBalType("OPENING");
+            ob.setDc(stmt.openingBalance.dc);
+            ob.setBalDate(java.time.LocalDate.now());
+            ob.setCurrency(stmt.openingBalance.currency);
+            ob.setAmount(opening);
+            statementBalanceRepository.save(ob);
+
+            StatementBalance cb = new StatementBalance();
+            cb.setStatementFile(sf);
+            cb.setBalType("CLOSING");
+            cb.setDc(stmt.closingBalance.dc);
+            cb.setBalDate(java.time.LocalDate.now());
+            cb.setCurrency(stmt.closingBalance.currency);
+            cb.setAmount(closing);
+            statementBalanceRepository.save(cb);
+
+            // Other balances
+            if (stmt.otherBalances != null) {
+                for (Mt940Parser.Balance bal : stmt.otherBalances) {
+                    StatementBalance b = new StatementBalance();
+                    b.setStatementFile(sf);
+                    b.setBalType(bal.type);
+                    b.setDc(bal.dc);
+                    b.setBalDate(java.time.LocalDate.now());
+                    b.setCurrency(bal.currency);
+                    b.setAmount(new java.math.BigDecimal(bal.amount.replace(",", ".")));
+                    statementBalanceRepository.save(b);
+                }
+            }
+
+            // 7. Persist transactions
+            for (Mt940Parser.Transaction txn : stmt.transactions) {
+                StatementTransaction st = new StatementTransaction();
+                st.setStatementFile(sf);
+                st.setLineNo(txn.lineNo);
+                st.setValueDate(java.time.LocalDate.now()); // Parse actual date if available
+                st.setEntryDate(null); // Parse if available
+                st.setDc(txn.dc);
+                st.setAmount(new java.math.BigDecimal(txn.amount.replace(",", ".")));
+                st.setSignedAmount(new java.math.BigDecimal(txn.signedAmount.replace(",", ".")));
+                st.setCurrency(txn.currency);
+                st.setTxnTypeCode(txn.txnTypeCode);
+                st.setBankReference(txn.bankReference);
+                st.setCustomerReference(txn.customerReference);
+                st.setEntryReference(txn.entryReference);
+                st.setNarrative(txn.narrative);
+                st.setNarrativeTokens(null); // Optionally serialize txn.narrativeTokens
+                st.setExtIdempotencyHash(txn.extIdempotencyHash);
+                st.setCreatedAt(java.time.LocalDateTime.now());
+                statementTransactionRepository.save(st);
+
+                // Persist Transaction86Segment for each narrative token (or the full narrative if no tokens)
+                if (txn.narrativeTokens != null && !txn.narrativeTokens.isEmpty()) {
+                    int segSeq = 1;
+                    for (var entry : txn.narrativeTokens.entrySet()) {
+                        Transaction86Segment seg = new Transaction86Segment();
+                        seg.setStatementTransaction(st);
+                        seg.setSegKey(entry.getKey());
+                        seg.setSegValue(entry.getValue());
+                        seg.setSegSeq(segSeq++);
+                        transaction86SegmentRepository.save(seg);
+                    }
+                } else if (txn.narrative != null) {
+                    Transaction86Segment seg = new Transaction86Segment();
+                    seg.setStatementTransaction(st);
+                    seg.setSegKey("FULL");
+                    seg.setSegValue(txn.narrative);
+                    seg.setSegSeq(1);
+                    transaction86SegmentRepository.save(seg);
+                }
+
+                // Persist RawStatementLine if available (from stmt.rawLines)
+                if (stmt.rawLines != null) {
+                    for (Mt940Parser.RawLine rawLine : stmt.rawLines) {
+                        if (rawLine.lineNo == txn.lineNo) { // match by line number
+                            RawStatementLine rsl = new RawStatementLine();
+                            rsl.setStatementFile(sf);
+                            rsl.setLineNo(rawLine.lineNo);
+                            rsl.setTag(rawLine.tag);
+                            rsl.setRawText(rawLine.rawText);
+                            rawStatementLineRepository.save(rsl);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+
+    /**
+     * Move file to ARCHIVE/YYYY/MM/DD.
+     */
+    private void moveToArchive(File file) {
+        log.debug("Moving file to archive: {}", file.getAbsolutePath());
+        LocalDate today = LocalDate.now();
+        String archivePath = String.format("%s/%04d/%02d/%02d", mt940Props.getArchiveDir(), today.getYear(), today.getMonthValue(), today.getDayOfMonth());
+        File archiveDir = new File(archivePath);
+        if (!archiveDir.exists() && !archiveDir.mkdirs()) {
+            throw new RuntimeException("Failed to create archive dir: " + archiveDir.getAbsolutePath());
+        }
+        File dest = new File(archiveDir, file.getName());
+        try {
+            Files.move(file.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to move file to archive: " + file.getAbsolutePath(), e);
+        }
+    }
+
+    /**
+     * Move file to QUARANTINE and log error.
+     */
+    private void moveToQuarantine(File file, String errorMessage) {
+        log.warn("Moving file to quarantine: {}. Reason: {}", file.getAbsolutePath(), errorMessage);
+        File dest = new File(mt940Props.getQuarantineDir(), file.getName());
+        try {
+            Files.move(file.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to move file to quarantine: " + file.getAbsolutePath(), e);
+        }
+        // TODO: Persist error details to import_error table
+        System.err.println("Quarantined file: " + file.getName() + ", reason: " + errorMessage);
+    }
+
+    /**
+     * Persist import error details (stub).
+     */
+    private void persistImportError(String fileHash, String fileName, String errorMsg) {
+        log.error("Import error for fileHash={}, file={}: {}", fileHash, fileName, errorMsg);
+        // TODO: Implement DB insert into import_error table
+        System.err.println("Import error for fileHash=" + fileHash + ", file=" + fileName + ": " + errorMsg);
+    }
+
+    // Additional methods for reporting, operator checks, idempotency, etc. can be added here
+}
