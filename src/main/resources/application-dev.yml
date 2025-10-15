@@ -38,8 +38,9 @@ app:
     expiration: 86400
     
 # Auditing toggle
-auditing:
-  enabled: false
+audit:
+  enabled: true
+  hashing-algorithm: SHA-256  # Optional: default is SHA-256
 
 server:
   port: 8082
