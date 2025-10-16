@@ -98,6 +98,11 @@
             <artifactId>pw-swift-core</artifactId>
             <version>${prowideswift.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>1.10.0</version>
+        </dependency>
         <!-- Apache POI for Excel parsing -->
         <dependency>
             <groupId>org.apache.poi</groupId>

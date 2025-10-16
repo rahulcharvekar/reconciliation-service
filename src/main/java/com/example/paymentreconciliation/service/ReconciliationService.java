@@ -2,7 +2,7 @@ package com.example.paymentreconciliation.service;
 
 import org.springframework.stereotype.Service;
 import org.slf4j.Logger;
-import com.example.paymentreconciliation.utilities.logger.LoggerFactoryProvider;
+import com.shared.utilities.logger.LoggerFactoryProvider;
 
 @Service
 public class ReconciliationService {

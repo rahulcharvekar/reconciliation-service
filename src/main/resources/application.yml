@@ -5,6 +5,14 @@ mt940:
   processing-dir: mt940/processing/
   archive-dir: mt940/archive/
   quarantine-dir: mt940/quarantine/
+
+# VAN file ingestion configuration
+van:
+  base-dir: van/
+  inbox-dir: van/inbox/
+  processing-dir: van/processing/
+  archive-dir: van/archive/
+  quarantine-dir: van/quarantine/
 # Common configuration for all environments
 spring:
   application:
@@ -39,6 +47,14 @@ app:
     issuer: payment-reconciliation-service
     audience: payment-reconciliation-api
     expiration: 86400
+  security:
+    permitted-paths:
+      - /actuator/**
+      - /v3/api-docs/**
+      - /swagger-ui/**
+      - /swagger-ui.html
+  swagger:
+    title: "Payment Reconciliation Service API"
 
 # Auditing toggle
 auditing:

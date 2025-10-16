@@ -113,3 +113,10 @@ server:
     connection-timeout: 20000
     max-http-form-post-size: 200MB
   forward-headers-strategy: framework  # For Azure Container Apps load balancer
+
+van:
+  baseDir: /path/to/van/base
+  inboxDir: /path/to/van/inbox
+  processingDir: /path/to/van/processing
+  archiveDir: /path/to/van/archive
+  quarantineDir: /path/to/van/quarantine

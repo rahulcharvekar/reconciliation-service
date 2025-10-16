@@ -22,6 +22,18 @@ public class ImportRun {
     @Column(name = "received_at", nullable = false)
     private LocalDateTime receivedAt;
 
+    @Column(name = "file_type", nullable = false, length = 16)
+    private String fileType;
+
+    @Column(name = "total_records")
+    private Integer totalRecords;
+
+    @Column(name = "processed_records")
+    private Integer processedRecords;
+
+    @Column(name = "failed_records")
+    private Integer failedRecords;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 16)
     private Status status;
@@ -71,6 +83,38 @@ public class ImportRun {
 
     public void setReceivedAt(LocalDateTime receivedAt) {
         this.receivedAt = receivedAt;
+    }
+
+    public String getFileType() {
+        return fileType;
+    }
+
+    public void setFileType(String fileType) {
+        this.fileType = fileType;
+    }
+
+    public Integer getTotalRecords() {
+        return totalRecords;
+    }
+
+    public void setTotalRecords(Integer totalRecords) {
+        this.totalRecords = totalRecords;
+    }
+
+    public Integer getProcessedRecords() {
+        return processedRecords;
+    }
+
+    public void setProcessedRecords(Integer processedRecords) {
+        this.processedRecords = processedRecords;
+    }
+
+    public Integer getFailedRecords() {
+        return failedRecords;
+    }
+
+    public void setFailedRecords(Integer failedRecords) {
+        this.failedRecords = failedRecords;
     }
 
     public Status getStatus() {

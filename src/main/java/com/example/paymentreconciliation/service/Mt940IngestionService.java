@@ -1,17 +1,12 @@
 
     package com.example.paymentreconciliation.service;
 
-import com.example.paymentreconciliation.utilities.logger.LoggerFactoryProvider;
+import com.shared.utilities.logger.LoggerFactoryProvider;
 import org.slf4j.Logger;
 
 import java.io.File;
 import java.util.List;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
-import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.UUID;
 
 /**
  * MT940 Ingestion Service
@@ -26,7 +21,7 @@ import com.example.paymentreconciliation.entity.*;
 import com.example.paymentreconciliation.repository.*;
 
 @Service
-public class Mt940IngestionService {
+public class Mt940IngestionService extends BaseIngestionService {
     private static final Logger log = LoggerFactoryProvider.getLogger(Mt940IngestionService.class);
     @Autowired
     private BankAccountRepository bankAccountRepository;
@@ -47,12 +42,35 @@ public class Mt940IngestionService {
     @Autowired
     private Mt940IngestionProperties mt940Props;
 
-    private static final long MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
-    private static final int FILE_STABILITY_WINDOW_SEC = 10;
+    @Override
+    protected String getInboxDir() {
+        return mt940Props.getInboxDir();
+    }
+
+    @Override
+    protected String getProcessingDir() {
+        return mt940Props.getProcessingDir();
+    }
+
+    @Override
+    protected String getArchiveDir() {
+        return mt940Props.getArchiveDir();
+    }
+
+    @Override
+    protected String getQuarantineDir() {
+        return mt940Props.getQuarantineDir();
+    }
+
+    @Override
+    protected String getFileExtension() {
+        return ".mt940";
+    }
 
     /**
      * Main entry point for polling and processing files.
      */
+    @Override
     public void pollAndProcessInbox() {
         log.info("Polling MT940 inbox directory: {}", mt940Props.getInboxDir());
         List<File> files = discoverStableFiles(mt940Props.getInboxDir());
@@ -69,36 +87,10 @@ public class Mt940IngestionService {
     }
 
     /**
-     * Discover files that are stable (not changing) for at least FILE_STABILITY_WINDOW_SEC.
-     */
-    private List<File> discoverStableFiles(String inboxDir) {
-        log.debug("Discovering stable files in inbox: {}", inboxDir);
-        // Poll directory, check file size unchanged for 10s, filter by extension
-        File dir = new File(inboxDir);
-        File[] files = dir.listFiles((d, name) -> name.endsWith(".mt940") || name.endsWith(".sta") || name.endsWith(".zip"));
-        if (files == null) {
-            log.debug("No files found in inbox directory: {}", inboxDir);
-            return List.of();
-        }
-        List<File> stable = new ArrayList<>();
-        for (File f : files) {
-            long size1 = f.length();
-            try { Thread.sleep(FILE_STABILITY_WINDOW_SEC * 1000L); } catch (InterruptedException ignored) {}
-            long size2 = f.length();
-            if (size1 == size2) {
-                log.debug("File is stable: {} (size: {} bytes)", f.getName(), size1);
-                stable.add(f);
-            } else {
-                log.debug("File is not stable (size changed): {} ({} -> {} bytes)", f.getName(), size1, size2);
-            }
-        }
-        return stable;
-    }
-
-    /**
      * Process a single file: move, hash, decompress, parse, validate, persist, archive/quarantine.
      */
-    private void processFile(File file) {
+    @Override
+    protected void processFile(File file) {
         log.info("Starting processing for file: {}", file.getAbsolutePath());
         // 1. Move file to PROCESSING with GUID suffix
     File processingFile = moveToProcessing(file);
@@ -144,45 +136,6 @@ public class Mt940IngestionService {
         } else {
             log.warn("Processing failed for file: {}. Moving to quarantine.", processingFile.getAbsolutePath());
             moveToQuarantine(processingFile, "One or more statements failed to import");
-        }
-    }
-
-    /**
-     * Move file from INBOX to PROCESSING with a GUID suffix to avoid collisions.
-     */
-    private File moveToProcessing(File file) {
-        log.debug("Moving file to processing directory: {}", file.getAbsolutePath());
-        String guid = UUID.randomUUID().toString();
-        String newName = file.getName() + "_" + guid;
-        File dest = new File(mt940Props.getProcessingDir(), newName);
-        try {
-            Files.move(file.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to move file to processing: " + file.getAbsolutePath(), e);
-        }
-        return dest;
-    }
-
-    /**
-     * Compute SHA-256 hash of the file.
-     */
-    private String computeSha256(File file) {
-        log.debug("Computing SHA-256 for file: {}", file.getAbsolutePath());
-        try (java.io.InputStream fis = new java.io.FileInputStream(file)) {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] buffer = new byte[8192];
-            int n;
-            while ((n = fis.read(buffer)) > 0) {
-                digest.update(buffer, 0, n);
-            }
-            byte[] hashBytes = digest.digest();
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hashBytes) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to compute SHA-256 for file: " + file.getAbsolutePath(), e);
         }
     }
 
@@ -261,34 +214,44 @@ public class Mt940IngestionService {
         importRun.setFileHash(fileHash);
         importRun.setFileSizeBytes(fileSize);
         importRun.setReceivedAt(java.time.LocalDateTime.now());
+        importRun.setFileType("MT940");
         importRun.setStatus(ImportRun.Status.PARSED);
         importRunRepository.save(importRun);
+
+        int totalStatements = statements.size();
+        int processedStatements = 0;
+        int failedStatements = 0;
 
         for (Mt940Parser.Statement stmt : statements) {
             // Validation: accountNo, currency, balances, transactions
             if (stmt.accountNo == null || stmt.accountNo.trim().isEmpty()) {
                 log.error("Statement missing account number. Skipping statement: {}", stmt);
                 persistImportError(fileHash, filename, "Missing account number in statement: " + stmt);
+                failedStatements++;
                 continue;
             }
             if (stmt.currency == null || stmt.currency.trim().isEmpty()) {
                 log.error("Statement missing currency. Skipping statement: {}", stmt);
                 persistImportError(fileHash, filename, "Missing currency in statement: " + stmt);
+                failedStatements++;
                 continue;
             }
             if (stmt.openingBalance == null || stmt.closingBalance == null) {
                 log.error("Statement missing opening/closing balance. Skipping statement: {}", stmt);
                 persistImportError(fileHash, filename, "Missing opening/closing balance in statement: " + stmt);
+                failedStatements++;
                 continue;
             }
             if (stmt.openingBalance.amount == null || stmt.closingBalance.amount == null) {
                 log.error("Statement missing opening/closing balance amount. Skipping statement: {}", stmt);
                 persistImportError(fileHash, filename, "Missing opening/closing balance amount in statement: " + stmt);
+                failedStatements++;
                 continue;
             }
             if (stmt.transactions == null || stmt.transactions.isEmpty()) {
                 log.error("Statement missing transactions. Skipping statement: {}", stmt);
                 persistImportError(fileHash, filename, "Missing transactions in statement: " + stmt);
+                failedStatements++;
                 continue;
             }
 
@@ -307,6 +270,7 @@ public class Mt940IngestionService {
             if (!stmt.openingBalance.currency.equals(stmt.currency) || !stmt.closingBalance.currency.equals(stmt.currency)) {
                 log.error("Currency mismatch in statement: {}", stmt.stmtRef20);
                 persistImportError(fileHash, filename, "Currency mismatch in statement: " + stmt.stmtRef20);
+                failedStatements++;
                 continue;
             }
 
@@ -321,8 +285,12 @@ public class Mt940IngestionService {
             if (expectedClosing.subtract(closing).abs().compareTo(new java.math.BigDecimal("0.02")) > 0) {
                 log.error("Opening + sum(transactions) != closing for statement: {}", stmt.stmtRef20);
                 persistImportError(fileHash, filename, "Opening + sum(transactions) != closing for statement: " + stmt.stmtRef20);
+                failedStatements++;
                 continue;
             }
+
+            // Now process the statement since validations passed
+            processedStatements++;
 
             // 5. Create StatementFile
             StatementFile sf = new StatementFile();
@@ -429,42 +397,21 @@ public class Mt940IngestionService {
                 }
             }
         }
+
+        // Update ImportRun with counts and final status
+        importRun.setTotalRecords(totalStatements);
+        importRun.setProcessedRecords(processedStatements);
+        importRun.setFailedRecords(failedStatements);
+        if (processedStatements > 0 && failedStatements == 0) {
+            importRun.setStatus(ImportRun.Status.IMPORTED);
+        } else if (processedStatements > 0) {
+            importRun.setStatus(ImportRun.Status.PARTIAL);
+        } else {
+            importRun.setStatus(ImportRun.Status.FAILED);
+        }
+        importRunRepository.save(importRun);
     }
     
-
-    /**
-     * Move file to ARCHIVE/YYYY/MM/DD.
-     */
-    private void moveToArchive(File file) {
-        log.debug("Moving file to archive: {}", file.getAbsolutePath());
-        LocalDate today = LocalDate.now();
-        String archivePath = String.format("%s/%04d/%02d/%02d", mt940Props.getArchiveDir(), today.getYear(), today.getMonthValue(), today.getDayOfMonth());
-        File archiveDir = new File(archivePath);
-        if (!archiveDir.exists() && !archiveDir.mkdirs()) {
-            throw new RuntimeException("Failed to create archive dir: " + archiveDir.getAbsolutePath());
-        }
-        File dest = new File(archiveDir, file.getName());
-        try {
-            Files.move(file.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to move file to archive: " + file.getAbsolutePath(), e);
-        }
-    }
-
-    /**
-     * Move file to QUARANTINE and log error.
-     */
-    private void moveToQuarantine(File file, String errorMessage) {
-        log.warn("Moving file to quarantine: {}. Reason: {}", file.getAbsolutePath(), errorMessage);
-        File dest = new File(mt940Props.getQuarantineDir(), file.getName());
-        try {
-            Files.move(file.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to move file to quarantine: " + file.getAbsolutePath(), e);
-        }
-        // TODO: Persist error details to import_error table
-        System.err.println("Quarantined file: " + file.getName() + ", reason: " + errorMessage);
-    }
 
     /**
      * Persist import error details (stub).

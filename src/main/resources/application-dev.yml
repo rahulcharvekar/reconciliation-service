@@ -37,10 +37,43 @@ app:
     audience: payment-reconciliation-api
     expiration: 86400
     
-# Auditing toggle
-audit:
-  enabled: true
-  hashing-algorithm: SHA-256  # Optional: default is SHA-256
+# Audit Utility Configuration
+shared-lib:
+  audit:
+    enabled: true  # Set to true to enable audit logging
+    table-name: audit_event
+    hashing-algorithm: SHA-256
+    initial-hash-value: 0000000000000000000000000000000000000000000000000000000000000000
+  # SFTP Utility Configuration
+  sftp:
+    enabled: false  # Set to true to enable SFTP operations
+    host: localhost
+    port: 22
+    username: user
+    password: password
+    remote-directory: /incoming
+    local-directory: /tmp/sftp
+    known-hosts-file: ~/.ssh/known_hosts
+    strict-host-key-checking: true
+  security:
+    enabled: true
+    permitted-paths: /actuator/**,/v3/api-docs/**,/swagger-ui/**,/swagger-ui.html  # Optional, defaults provided
+  filters:
+    enabled: true   
 
 server:
   port: 8082
+
+mt940:
+  baseDir: /path/to/mt940/base
+  inboxDir: /path/to/mt940/inbox
+  processingDir: /path/to/mt940/processing
+  archiveDir: /path/to/mt940/archive
+  quarantineDir: /path/to/mt940/quarantine
+
+van:
+  baseDir: /path/to/van/base
+  inboxDir: /path/to/van/inbox
+  processingDir: /path/to/van/processing
+  archiveDir: /path/to/van/archive
+  quarantineDir: /path/to/van/quarantine
