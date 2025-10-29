@@ -120,3 +120,23 @@ van:
   processingDir: /path/to/van/processing
   archiveDir: /path/to/van/archive
   quarantineDir: /path/to/van/quarantine
+
+app:
+  jwt:
+    secret: ${APP_JWT_SECRET:}
+    issuer: user-auth-service
+    audience: payment-services
+    expiration: 86400
+
+shared-lib:
+  security:
+    enabled: true
+    permitted-paths:
+      - /actuator/**
+      - /v3/api-docs/**
+      - /swagger-ui/**
+      - /swagger-ui.html
+    introspection:
+      url: ${AUTH_SERVICE_BASE_URL:http://auth-service.payment-recon.svc.cluster.local}/internal/auth/introspect
+      api-key: ${INTERNAL_API_KEY:}
+      api-key-header: X-Internal-Api-Key
