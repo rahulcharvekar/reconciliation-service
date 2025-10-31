@@ -58,15 +58,16 @@ public abstract class BaseIngestionService {
             return List.of();
         }
         List<File> stable = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        long stabilityWindowMs = FILE_STABILITY_WINDOW_SEC * 1000L;
         for (File f : files) {
-            long size1 = f.length();
-            try { Thread.sleep(FILE_STABILITY_WINDOW_SEC * 1000L); } catch (InterruptedException ignored) {}
-            long size2 = f.length();
-            if (size1 == size2) {
-                log.debug("File is stable: {} (size: {} bytes)", f.getName(), size1);
+            long lastModified = f.lastModified();
+            long age = now - lastModified;
+            if (age >= stabilityWindowMs) {
+                log.debug("File is stable: {} (age: {} ms, size: {} bytes)", f.getName(), age, f.length());
                 stable.add(f);
             } else {
-                log.debug("File is not stable (size changed): {} ({} -> {} bytes)", f.getName(), size1, size2);
+                log.debug("File is not yet stable: {} (age: {} ms < {} ms)", f.getName(), age, stabilityWindowMs);
             }
         }
         return stable;
@@ -141,7 +142,25 @@ public abstract class BaseIngestionService {
         } catch (IOException e) {
             throw new RuntimeException("Failed to move file to quarantine: " + file.getAbsolutePath(), e);
         }
-        // TODO: Persist error details to import_error table
-        System.err.println("Quarantined file: " + file.getName() + ", reason: " + errorMessage);
+        
+        // Persist error details for audit trail and debugging
+        // TODO: Create ImportError entity and repository, then replace this with actual DB persistence
+        log.error("FILE_QUARANTINED: file='{}', originalPath='{}', quarantinePath='{}', reason='{}', timestamp='{}'", 
+                  file.getName(), 
+                  file.getAbsolutePath(), 
+                  dest.getAbsolutePath(), 
+                  errorMessage,
+                  java.time.LocalDateTime.now());
+        
+        // Future implementation:
+        // ImportError error = ImportError.builder()
+        //     .fileName(file.getName())
+        //     .originalPath(file.getAbsolutePath())
+        //     .quarantinePath(dest.getAbsolutePath())
+        //     .errorMessage(errorMessage)
+        //     .errorType("QUARANTINE")
+        //     .occurredAt(LocalDateTime.now())
+        //     .build();
+        // importErrorRepository.save(error);
     }
 }

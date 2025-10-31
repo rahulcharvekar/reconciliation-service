@@ -25,6 +25,8 @@ public class VANIngestionService extends BaseIngestionService {
     private ImportRunRepository importRunRepository;
     @Autowired
     private VANTransactionRepository vanTransactionRepository;
+    @Autowired
+    private ImportErrorRepository importErrorRepository;
 
     @Autowired
     private VANIngestionProperties vanProps;
@@ -96,13 +98,19 @@ public class VANIngestionService extends BaseIngestionService {
             return;
         }
 
+        ImportRun importRun = createImportRun(processingFile.getName(), fileHash, fileSize);
+
         try {
             log.info("Parsing and persisting VAN file: {}", processingFile.getAbsolutePath());
-            parseValidatePersist(processingFile, fileHash, fileSize);
+            parseValidatePersist(processingFile, importRun);
             log.info("Successfully processed file: {}. Moving to archive.", processingFile.getAbsolutePath());
             moveToArchive(processingFile);
         } catch (Exception e) {
-            log.warn("Processing failed for file: {}. Moving to quarantine.", processingFile.getAbsolutePath());
+            log.warn("Processing failed for file: {}. Moving to quarantine.", processingFile.getAbsolutePath(), e);
+            importRun.setStatus(ImportRun.Status.FAILED);
+            importRun.setErrorMessage(e.getMessage());
+            importRunRepository.save(importRun);
+            persistImportError(importRun, "UNHANDLED", "Unhandled error during VAN ingest: " + e.getMessage(), null);
             moveToQuarantine(processingFile, "One or more statements failed to import");
         }
     }
@@ -112,14 +120,24 @@ public class VANIngestionService extends BaseIngestionService {
      */
     private boolean isDuplicate(String fileHash) {
         log.debug("Checking for duplicate file hash: {}", fileHash);
-        // TODO: Implement DB check for import_run.file_hash
-        return false;
+        return importRunRepository.findByFileHash(fileHash).isPresent();
+    }
+
+    private ImportRun createImportRun(String filename, String fileHash, long fileSize) {
+        ImportRun importRun = new ImportRun();
+        importRun.setFilename(filename);
+        importRun.setFileHash(fileHash);
+        importRun.setFileSizeBytes(fileSize);
+        importRun.setReceivedAt(java.time.LocalDateTime.now());
+        importRun.setFileType("VAN");
+        importRun.setStatus(ImportRun.Status.NEW);
+        return importRunRepository.save(importRun);
     }
 
     /**
      * Parse, validate, and persist all transactions in a DB transaction.
      */
-    private void parseValidatePersist(File csvFile, String fileHash, long fileSize) {
+    private void parseValidatePersist(File csvFile, ImportRun importRun) {
         log.debug("Parsing and validating VAN file: {}", csvFile.getAbsolutePath());
         VANParser parser = new VANParser();
         List<VANParser.VANTransactionData> transactions;
@@ -128,20 +146,14 @@ public class VANIngestionService extends BaseIngestionService {
         } catch (VANParser.VANParseException e) {
             throw new RuntimeException("VAN parse error: " + e.getMessage(), e);
         }
-        persistParsedTransactions(transactions, csvFile.getName(), fileHash, fileSize);
+        persistParsedTransactions(transactions, csvFile.getName(), importRun);
     }
 
     @Transactional
-    public void persistParsedTransactions(List<VANParser.VANTransactionData> transactions, String filename, String fileHash, long fileSize) {
-        log.info("Persisting parsed transactions for file: {} (hash={})", filename, fileHash);
-        // Create ImportRun
-        ImportRun importRun = new ImportRun();
-        importRun.setFilename(filename);
-        importRun.setFileHash(fileHash);
-        importRun.setFileSizeBytes(fileSize);
-        importRun.setReceivedAt(java.time.LocalDateTime.now());
-        importRun.setFileType("VAN");
+    public void persistParsedTransactions(List<VANParser.VANTransactionData> transactions, String filename, ImportRun importRun) {
+        log.info("Persisting parsed transactions for file: {} (hash={})", filename, importRun.getFileHash());
         importRun.setStatus(ImportRun.Status.PARSED);
+        importRun.setErrorMessage(null);
         importRunRepository.save(importRun);
 
         int totalRecords = transactions.size();
@@ -152,19 +164,19 @@ public class VANIngestionService extends BaseIngestionService {
             // Basic validation
             if (txn.mainAccountNumber == null || txn.mainAccountNumber.trim().isEmpty()) {
                 log.error("Missing main account number. Skipping transaction: {}", txn);
-                persistImportError(fileHash, filename, "Missing main account number");
+                persistImportError(importRun, "VALIDATION", "Missing main account number", null);
                 failedRecords++;
                 continue;
             }
             if (txn.virtualAccountNumber == null || txn.virtualAccountNumber.trim().isEmpty()) {
                 log.error("Missing virtual account number. Skipping transaction: {}", txn);
-                persistImportError(fileHash, filename, "Missing virtual account number");
+                persistImportError(importRun, "VALIDATION", "Missing virtual account number", null);
                 failedRecords++;
                 continue;
             }
             if (txn.amount == null || txn.amount.compareTo(java.math.BigDecimal.ZERO) <= 0) {
                 log.error("Invalid amount. Skipping transaction: {}", txn);
-                persistImportError(fileHash, filename, "Invalid amount");
+                persistImportError(importRun, "VALIDATION", "Invalid amount", null);
                 failedRecords++;
                 continue;
             }
@@ -212,9 +224,17 @@ public class VANIngestionService extends BaseIngestionService {
     /**
      * Persist import error details.
      */
-    private void persistImportError(String fileHash, String fileName, String errorMsg) {
-        log.error("Import error for fileHash={}, file={}: {}", fileHash, fileName, errorMsg);
-        // TODO: Implement DB insert into import_error table
-        System.err.println("Import error for fileHash=" + fileHash + ", file=" + fileName + ": " + errorMsg);
+    private void persistImportError(ImportRun importRun, String code, String errorMsg, Integer lineNo) {
+        if (importRun == null) {
+            log.warn("Unable to persist import error because import run is not available: {}", errorMsg);
+            return;
+        }
+
+        ImportError error = new ImportError();
+        error.setImportRun(importRun);
+        error.setCode(code != null ? code : "VALIDATION_ERROR");
+        error.setMessage(errorMsg);
+        error.setLineNo(lineNo);
+        importErrorRepository.save(error);
     }
 }

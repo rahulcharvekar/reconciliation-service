@@ -30,5 +30,66 @@ public class ImportError {
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
-    // Getters and setters omitted for brevity
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public ImportRun getImportRun() {
+        return importRun;
+    }
+
+    public void setImportRun(ImportRun importRun) {
+        this.importRun = importRun;
+    }
+
+    public StatementFile getStatementFile() {
+        return statementFile;
+    }
+
+    public void setStatementFile(StatementFile statementFile) {
+        this.statementFile = statementFile;
+    }
+
+    public Integer getLineNo() {
+        return lineNo;
+    }
+
+    public void setLineNo(Integer lineNo) {
+        this.lineNo = lineNo;
+    }
+
+    public String getCode() {
+        return code;
+    }
+
+    public void setCode(String code) {
+        this.code = code;
+    }
+
+    public String getMessage() {
+        return message;
+    }
+
+    public void setMessage(String message) {
+        this.message = message;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
+    }
 }

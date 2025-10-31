@@ -123,10 +123,10 @@ van:
 
 app:
   jwt:
-    secret: ${APP_JWT_SECRET:}
-    issuer: user-auth-service
-    audience: payment-services
-    expiration: 86400
+    secret: ${APP_JWT_SECRET}
+    issuer: ${APP_JWT_ISSUER:user-auth-service}
+    audience: ${APP_JWT_AUDIENCE:payment-services}
+    expiration: ${APP_JWT_EXPIRATION:86400}
 
 shared-lib:
   security:

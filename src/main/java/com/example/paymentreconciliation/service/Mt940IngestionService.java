@@ -40,6 +40,9 @@ public class Mt940IngestionService extends BaseIngestionService {
     private Transaction86SegmentRepository transaction86SegmentRepository;
 
     @Autowired
+    private ImportErrorRepository importErrorRepository;
+
+    @Autowired
     private Mt940IngestionProperties mt940Props;
 
     @Override
@@ -124,7 +127,7 @@ public class Mt940IngestionService extends BaseIngestionService {
             } catch (Exception e) {
                 allSuccess = false;
                 log.error("Error parsing/persisting MT940 file: {}. Error: {}", mt940.getAbsolutePath(), e.getMessage(), e);
-                persistImportError(fileHash, mt940.getName(), e.getMessage());
+                persistImportError(null, fileHash, "PARSING_ERROR", "Failed to ingest " + mt940.getName() + ": " + e.getMessage(), null, null);
             }
         }
 
@@ -145,8 +148,7 @@ public class Mt940IngestionService extends BaseIngestionService {
      */
     private boolean isDuplicate(String fileHash) {
         log.debug("Checking for duplicate file hash: {}", fileHash);
-        // TODO: Implement DB check for import_run.file_hash
-        return false;
+        return importRunRepository.findByFileHash(fileHash).isPresent();
     }
 
     /**
@@ -226,31 +228,31 @@ public class Mt940IngestionService extends BaseIngestionService {
             // Validation: accountNo, currency, balances, transactions
             if (stmt.accountNo == null || stmt.accountNo.trim().isEmpty()) {
                 log.error("Statement missing account number. Skipping statement: {}", stmt);
-                persistImportError(fileHash, filename, "Missing account number in statement: " + stmt);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Missing account number in statement: " + stmt, null, null);
                 failedStatements++;
                 continue;
             }
             if (stmt.currency == null || stmt.currency.trim().isEmpty()) {
                 log.error("Statement missing currency. Skipping statement: {}", stmt);
-                persistImportError(fileHash, filename, "Missing currency in statement: " + stmt);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Missing currency in statement: " + stmt, null, null);
                 failedStatements++;
                 continue;
             }
             if (stmt.openingBalance == null || stmt.closingBalance == null) {
                 log.error("Statement missing opening/closing balance. Skipping statement: {}", stmt);
-                persistImportError(fileHash, filename, "Missing opening/closing balance in statement: " + stmt);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Missing opening/closing balance in statement: " + stmt, null, null);
                 failedStatements++;
                 continue;
             }
             if (stmt.openingBalance.amount == null || stmt.closingBalance.amount == null) {
                 log.error("Statement missing opening/closing balance amount. Skipping statement: {}", stmt);
-                persistImportError(fileHash, filename, "Missing opening/closing balance amount in statement: " + stmt);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Missing opening/closing balance amount in statement: " + stmt, null, null);
                 failedStatements++;
                 continue;
             }
             if (stmt.transactions == null || stmt.transactions.isEmpty()) {
                 log.error("Statement missing transactions. Skipping statement: {}", stmt);
-                persistImportError(fileHash, filename, "Missing transactions in statement: " + stmt);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Missing transactions in statement: " + stmt, null, null);
                 failedStatements++;
                 continue;
             }
@@ -269,7 +271,7 @@ public class Mt940IngestionService extends BaseIngestionService {
             // 3. Validate currency match
             if (!stmt.openingBalance.currency.equals(stmt.currency) || !stmt.closingBalance.currency.equals(stmt.currency)) {
                 log.error("Currency mismatch in statement: {}", stmt.stmtRef20);
-                persistImportError(fileHash, filename, "Currency mismatch in statement: " + stmt.stmtRef20);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Currency mismatch in statement: " + stmt.stmtRef20, null, null);
                 failedStatements++;
                 continue;
             }
@@ -284,7 +286,7 @@ public class Mt940IngestionService extends BaseIngestionService {
             java.math.BigDecimal expectedClosing = opening.add(sumTxns);
             if (expectedClosing.subtract(closing).abs().compareTo(new java.math.BigDecimal("0.02")) > 0) {
                 log.error("Opening + sum(transactions) != closing for statement: {}", stmt.stmtRef20);
-                persistImportError(fileHash, filename, "Opening + sum(transactions) != closing for statement: " + stmt.stmtRef20);
+                persistImportError(importRun, fileHash, "VALIDATION_ERROR", "Opening + sum(transactions) != closing for statement: " + stmt.stmtRef20, null, null);
                 failedStatements++;
                 continue;
             }
@@ -416,10 +418,30 @@ public class Mt940IngestionService extends BaseIngestionService {
     /**
      * Persist import error details (stub).
      */
-    private void persistImportError(String fileHash, String fileName, String errorMsg) {
-        log.error("Import error for fileHash={}, file={}: {}", fileHash, fileName, errorMsg);
-        // TODO: Implement DB insert into import_error table
-        System.err.println("Import error for fileHash=" + fileHash + ", file=" + fileName + ": " + errorMsg);
+    private void persistImportError(ImportRun importRun,
+                                    String fileHash,
+                                    String code,
+                                    String errorMsg,
+                                    StatementFile statementFile,
+                                    Integer lineNo) {
+        ImportRun targetRun = importRun;
+        if (targetRun == null && fileHash != null) {
+            targetRun = importRunRepository.findByFileHash(fileHash).orElse(null);
+        }
+
+        if (targetRun == null) {
+            log.warn("Unable to persist import error because import run could not be resolved (hash={}, message={})",
+                    fileHash, errorMsg);
+            return;
+        }
+
+        ImportError error = new ImportError();
+        error.setImportRun(targetRun);
+        error.setStatementFile(statementFile);
+        error.setLineNo(lineNo);
+        error.setCode(code != null ? code : "VALIDATION_ERROR");
+        error.setMessage(errorMsg);
+        importErrorRepository.save(error);
     }
 
     // Additional methods for reporting, operator checks, idempotency, etc. can be added here
