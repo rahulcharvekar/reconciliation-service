@@ -1,10 +1,14 @@
-# Production environment configuration for Azure Container Apps with Azure MySQL Flexible Server
+# Production environment configuration for Azure Container Apps with Azure Database for PostgreSQL
 spring:
   datasource:
-    url: ${DB_URL:jdbc:mysql://paymentreconciliation.mysql.database.azure.com:3306/paymentreconciliation_prod?useSSL=true&requireSSL=true&sslMode=REQUIRED&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8&useUnicode=true}
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    username: ${DB_USERNAME}
-    password: ${DB_PASSWORD}
+    # url: ${DB_URL:jdbc:mysql://paymentreconciliation.mysql.database.azure.com:3306/paymentreconciliation_prod?useSSL=true&requireSSL=true&sslMode=REQUIRED&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8&useUnicode=true}
+    # driver-class-name: com.mysql.cj.jdbc.Driver
+    # username: ${DB_USERNAME}
+    # password: ${DB_PASSWORD}
+    url: ${DB_URL:jdbc:postgresql://paymentreconciliation.postgres.database.azure.com:5432/labormanagement?sslmode=require}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -20,7 +24,8 @@ spring:
     show-sql: false
     properties:
       hibernate:
-        dialect: org.hibernate.dialect.MySQLDialect
+        # dialect: org.hibernate.dialect.MySQLDialect
+        dialect: org.hibernate.dialect.PostgreSQLDialect
         "[format_sql]": false
         jdbc:
           "[batch_size]": 25
@@ -28,6 +33,7 @@ spring:
         "[order_updates]": true
         connection:
           "[provider_disables_autocommit]": true
+        default_schema: payment_flow
   jackson:
     serialization:
       write-dates-as-timestamps: false

@@ -5,6 +5,9 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
 @Entity
 @Table(name = "statement_transaction", uniqueConstraints = @UniqueConstraint(name = "uq_txn_hash", columnNames = {"ext_idempotency_hash"}))
 public class StatementTransaction {
@@ -52,7 +55,8 @@ public class StatementTransaction {
     @Column(name = "narrative")
     private String narrative;
 
-    @Column(name = "narrative_tokens", columnDefinition = "json")
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "narrative_tokens", columnDefinition = "jsonb")
     private String narrativeTokens;
 
 
