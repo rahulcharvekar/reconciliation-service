@@ -22,7 +22,6 @@ com.example.reconciliation/
 └── util/             # Utility classes and helpers
 ```
 
-
 ## Coding Standards
 
 - Follow Spring Boot conventions and existing patterns
@@ -36,11 +35,11 @@ com.example.reconciliation/
 
 **ALWAYS read `documentation/LBE/guides/data-access-patterns.md` before writing database code.**
 
-| Pattern              | Use For                                 | Examples                                    |
-| -------------------- | --------------------------------------- | ------------------------------------------- |
-| **JPA Repository**   | CRUD, writes, simple reads              | `ReconciliationRepository`, `BankFileRepository` |
-| **jOOQ DSL**         | Complex queries, multi-joins, filters   | `ReconciliationQueryDao` (future)           |
-| **jOOQ + SQL Files** | Analyst reports, aggregations, CTEs     | `sql/reconciliation/matching_summary.sql` (future) |
+| Pattern              | Use For                               | Examples                                           |
+| -------------------- | ------------------------------------- | -------------------------------------------------- |
+| **JPA Repository**   | CRUD, writes, simple reads            | `ReconciliationRepository`, `BankFileRepository`   |
+| **jOOQ DSL**         | Complex queries, multi-joins, filters | `ReconciliationQueryDao` (future)                  |
+| **jOOQ + SQL Files** | Analyst reports, aggregations, CTEs   | `sql/reconciliation/matching_summary.sql` (future) |
 
 ### Rules for ALL Patterns
 
@@ -114,12 +113,14 @@ public class Transaction {
 ### Best Practices
 
 **DO:**
+
 - ✅ Use `@Auditable` on bank file upload/processing endpoints
 - ✅ Use `@EntityListeners` on Transaction, Reconciliation entities
 - ✅ Log reconciliation matches with confidence scores
 - ✅ Track board approval actions
 
 **DON'T:**
+
 - ❌ Log sensitive bank details (account numbers)
 - ❌ Skip audit for failed matches (failures are valuable data)
 - ❌ Use generic action names (be specific: BANK_FILE_PROCESSED)
@@ -180,21 +181,25 @@ public class Transaction {
 ## Essential Reading 🎯
 
 **Start Here:**
+
 - `documentation/LBE/README.md` – Guided journey through auth system
 - `documentation/LBE/architecture/overview.md` – System topology and flows
 - `documentation/LBE/architecture/data-map.md` – Table relationships
 - `documentation/LBE/architecture/audit-design.md` – Audit system ⭐
 
 **Foundations:**
+
 - `documentation/LBE/foundations/access-control-101.md` – RBAC fundamentals
 - `documentation/LBE/foundations/data-guardrails-101.md` – RLS primer
 
 ## Implementation Guides 💻
 
 **Data Access (CRITICAL):**
+
 - `documentation/LBE/guides/data-access-patterns.md` ⭐ – **Read before ANY database code**
 
 **Workflows:**
+
 - `documentation/LBE/guides/login-to-data.md` – Login → JWT → RLS flow
 - `documentation/LBE/guides/setup/rbac.md` – RBAC setup
 - `documentation/LBE/guides/setup/vpd.md` – RLS/VPD setup
@@ -217,6 +222,7 @@ public class Transaction {
 ## Maintenance Checklist ✅
 
 **Adding Endpoint:**
+
 1. Choose data pattern (`data-access-patterns.md`)
 2. Implement: DTO → DAO → Service → Controller
 3. Register: `auth.endpoints` + `auth.endpoint_policies`
@@ -224,18 +230,21 @@ public class Transaction {
 5. Test: Authorization + RLS
 
 **Modifying Roles/Policies:**
+
 1. SQL migration
 2. Update: `policy-matrix.md` + `role-catalog.md`
 3. Test with personas
 4. Document in `recent-updates.md`
 
 **Schema Changes:**
+
 1. Migration script
 2. Update: `data-map.md` + `TABLE_NAMES_REFERENCE.md`
 3. Test RLS
 4. Document in `recent-updates.md`
 
 **Audit Changes:**
+
 1. Match `audit-quick-reference.md`
 2. Update `audit-design.md` (Reconciliation section)
 3. Ensure compliance
@@ -248,17 +257,17 @@ public class Transaction {
 
 ## Quick Links �
 
-| Task | Documentation |
-|------|---------------|
-| Local setup | `guides/local-environment.md` |
-| Architecture | `architecture/overview.md` |
-| **Data access** | **`guides/data-access-patterns.md`** ⭐ |
-| Add endpoint | `guides/extend-access.md` |
-| Create role/policy | `guides/setup/rbac.md` |
-| Debug auth | `playbooks/troubleshoot-auth.md` |
-| RLS | `foundations/data-guardrails-101.md` |
-| PostgreSQL ops | `reference/postgres-operations.md` |
-| Recent changes | `reference/recent-updates.md` |
+| Task               | Documentation                           |
+| ------------------ | --------------------------------------- |
+| Local setup        | `guides/local-environment.md`           |
+| Architecture       | `architecture/overview.md`              |
+| **Data access**    | **`guides/data-access-patterns.md`** ⭐ |
+| Add endpoint       | `guides/extend-access.md`               |
+| Create role/policy | `guides/setup/rbac.md`                  |
+| Debug auth         | `playbooks/troubleshoot-auth.md`        |
+| RLS                | `foundations/data-guardrails-101.md`    |
+| PostgreSQL ops     | `reference/postgres-operations.md`      |
+| Recent changes     | `reference/recent-updates.md`           |
 
 ---
 
