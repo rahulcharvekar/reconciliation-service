@@ -49,9 +49,6 @@ com.example.reconciliation/
 
 **Details:** See `documentation/LBE/guides/data-access-patterns.md`
 
-    │    └──────┬───────┘          │ Analysis       │
-    │           │                  └────────┬───────┘
-
 ## Security Guidelines
 
 ### Authorization & Data Access
