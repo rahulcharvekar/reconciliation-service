@@ -282,242 +282,109 @@ This service currently uses **JPA primarily**, with plans to add jOOQ for analyt
 
 ## Audit Logging Guidelines ⭐ CRITICAL
 
-**ALWAYS consult `documentation/LBE/architecture/audit-design.md` for complete audit system documentation.**
+**Read:** `documentation/LBE/architecture/audit-design.md` | `documentation/LBE/reference/audit-quick-reference.md`
 
-### Centralized Audit Schema
+### Two Audit Mechanisms
 
-This service writes to a **centralized audit schema** shared across all services:
+| Mechanism                 | Purpose                                            | Implementation                                                  |
+| ------------------------- | -------------------------------------------------- | --------------------------------------------------------------- |
+| **API-Level Auditing**    | Log controller actions, endpoints, business events | `@Auditable` annotation on controllers                          |
+| **Entity-Level Auditing** | Track data changes with tamper detection           | `@EntityListeners(SharedEntityAuditListener.class)` on entities |
 
-- **audit.audit_event** - General action logging (API calls, user actions, system events)
-- **audit.entity_audit_event** - Entity-level change tracking with hash chains
-
-### Configuration
-
-Audit configuration is in `application.yml`:
+### Configuration (DO NOT CHANGE)
 
 ```yaml
 shared-lib:
   audit:
     enabled: true
-    table-name: audit.audit_event
-    service-name: reconciliation-service # DO NOT CHANGE
-    source-schema: reconciliation # DO NOT CHANGE
+    service-name: reconciliation-service
+    source-schema: reconciliation
   entity-audit:
     enabled: true
-    table-name: audit.entity_audit_event
-    service-name: reconciliation-service # DO NOT CHANGE
-    source-schema: reconciliation # DO NOT CHANGE
-    source-table: transactions # Primary table for this service
+    service-name: reconciliation-service
+    source-schema: reconciliation
+    source-table: transactions
 ```
 
-**CRITICAL:** Never modify `service-name` or `source-schema` values—these enable cross-service audit queries.
+### 1. API-Level Auditing with @Auditable
 
-### When to Use Each Audit Table
+```java
+@RestController
+@RequestMapping("/api/reconciliation")
+public class ReconciliationController {
 
-#### Use audit.audit_event for:
+    @PostMapping("/bank-files")
+    @Auditable(
+        action = "BANK_FILE_UPLOADED",
+        entityType = "BANK_FILE",
+        description = "Bank file uploaded for processing"
+    )
+    public ResponseEntity<?> uploadBankFile(@RequestParam("file") MultipartFile file) {
+        // Audit logged with endpoint, file metadata, trace_id
+    }
 
-- ✅ Bank file upload and processing events (MT940, VAN)
-- ✅ Reconciliation matching attempts (successful and failed)
-- ✅ Board approval actions (approve, reject, request changes)
-- ✅ Receipt processing events
-- ✅ Transaction import/export operations
-- ✅ Reconciliation rule changes
-- ✅ Status transitions and workflow events
+    @PostMapping("/match")
+    @Auditable(
+        action = "RECONCILIATION_MATCHED",
+        entityType = "RECONCILIATION",
+        includeRequestBody = true
+    )
+    public ResponseEntity<?> matchTransactions(@RequestBody MatchRequest request) {
+        // Business logic
+    }
+}
+```
 
-#### Use audit.entity_audit_event for:
+### 2. Entity-Level Auditing
 
-- ✅ Transaction record changes (create, update, delete)
-- ✅ Reconciliation entity modifications
-- ✅ Bank file metadata changes
-- ✅ Approval record updates
-- ✅ Any sensitive reconciliation data requiring tamper detection
+```java
+@Entity
+@Table(name = "transactions", schema = "reconciliation")
+@EntityListeners(SharedEntityAuditListener.class)
+public class Transaction {
+    // All changes tracked with before/after values + hash chain
+}
+```
 
-### Manual Audit Logging
+### 3. Manual Auditing for Complex Operations
 
 ```java
 @Autowired
 private AuditTrailService auditTrailService;
 
 public void processBankFile(BankFile file, Long userId) {
-    // Business logic
     List<Transaction> transactions = parseBankFile(file);
-    bankFileRepository.save(file);
-
-    // Log audit event
-    auditTrailService.logAction(
-        userId,                                    // user_id
-        "BANK_FILE_PROCESSED",                     // action
-        "BANK_FILE",                               // entity_type
-        String.valueOf(file.getId()),              // entity_id
-        file.getFileName(),                        // entity_name
-        String.format("Processed bank file with %d transactions", transactions.size()),
-        Map.of(                                    // metadata
-            "file_name", file.getFileName(),
-            "file_type", file.getFileType(),
-            "transaction_count", transactions.size(),
-            "processing_time_ms", processingTime,
-            "trace_id", traceId
-        )
-    );
+    auditTrailService.logAction(userId, "BANK_FILE_PROCESSED", "BANK_FILE",
+        String.valueOf(file.getId()), file.getFileName(),
+        String.format("Processed %d transactions from %s", transactions.size(), file.getFileName()),
+        Map.of("transaction_count", transactions.size(), "file_type", file.getType()));
 }
 ```
 
-### Automatic Entity Audit
+### Best Practices
 
-Enable automatic audit for JPA entities:
+**DO:**
 
-```java
-@Entity
-@Table(name = "transactions", schema = "reconciliation")
-@EntityListeners(SharedEntityAuditListener.class)  // Enable automatic auditing
-public class Transaction {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+- ✅ Use `@Auditable` on bank file upload/processing endpoints
+- ✅ Use `@EntityListeners` on Transaction, Reconciliation entities
+- ✅ Log reconciliation matches with confidence scores
+- ✅ Track board approval actions
 
-    private String transactionRef;
-    private BigDecimal amount;
-    private String status;
+**DON'T:**
 
-    // All changes to this entity are automatically audited with:
-    // - before/after values
-    // - cryptographic hash chain for tamper detection
-    // - operation type (INSERT, UPDATE, DELETE)
-}
-```
+- ❌ Log sensitive bank details (account numbers)
+- ❌ Skip audit for failed matches (failures are valuable data)
+- ❌ Use generic action names (be specific: BANK_FILE_PROCESSED)
 
-### Audit Best Practices for Reconciliation Service
+### Reconciliation Service Audit Checklist
 
-#### DO:
+- [ ] Bank file endpoints have `@Auditable`
+- [ ] Reconciliation matching actions are logged
+- [ ] Board approval endpoints have `@Auditable`
+- [ ] Transaction/Reconciliation entities have `@EntityListeners`
+- [ ] Import/export operations are tracked
 
-✅ Log all bank file processing events (upload, parse, import)  
-✅ Log reconciliation matching attempts with match confidence scores  
-✅ Include trace_id in all audit events for request correlation  
-✅ Log board approval/rejection decisions with justification  
-✅ Use entity audit for Transaction table changes (automatically tracked)  
-✅ Log reconciliation rule changes with before/after values  
-✅ Include file_name and transaction_count in file processing events  
-✅ Tag events with business-meaningful actions (BANK_FILE_UPLOADED, RECONCILIATION_MATCHED)
-
-#### DON'T:
-
-❌ Log sensitive bank details (account numbers, routing numbers) in audit metadata  
-❌ Skip audit logging for failed matching attempts—failures are important for analysis  
-❌ Modify audit tables directly—they're append-only  
-❌ Delete audit records (archive instead)  
-❌ Use generic action names like "PROCESS" (be specific: "BANK_FILE_PROCESSED")
-
-### Common Audit Patterns for Reconciliation
-
-#### Bank File Upload
-
-```java
-auditTrailService.logAction(
-    userId,
-    "BANK_FILE_UPLOADED",
-    "BANK_FILE",
-    String.valueOf(fileId),
-    fileName,
-    String.format("Uploaded %s (%d KB)", fileName, fileSizeKB),
-    Map.of(
-        "file_name", fileName,
-        "file_size_kb", fileSizeKB,
-        "file_type", fileType,
-        "upload_timestamp", uploadTime,
-        "trace_id", traceId
-    )
-);
-```
-
-#### Reconciliation Match
-
-```java
-auditTrailService.logAction(
-    userId,
-    "RECONCILIATION_MATCHED",
-    "RECONCILIATION",
-    String.valueOf(reconciliationId),
-    reconciliationRef,
-    String.format("Matched transaction %s with payment %s (confidence: %.2f)",
-        transactionRef, paymentRef, matchConfidence),
-    Map.of(
-        "transaction_ref", transactionRef,
-        "payment_ref", paymentRef,
-        "match_confidence", matchConfidence,
-        "match_algorithm", algorithmName,
-        "amount", amount
-    )
-);
-```
-
-#### Board Approval
-
-```java
-auditTrailService.logAction(
-    userId,
-    "BOARD_APPROVAL_GRANTED",
-    "APPROVAL",
-    String.valueOf(approvalId),
-    approvalRef,
-    String.format("Board member approved reconciliation batch %s", batchId),
-    Map.of(
-        "batch_id", batchId,
-        "approved_by", userId,
-        "transaction_count", transactionCount,
-        "total_amount", totalAmount,
-        "approval_notes", approvalNotes
-    )
-);
-```
-
-### Querying Audit Logs
-
-```java
-// Use AuditEventRepository for programmatic queries
-@Autowired
-private AuditEventRepository auditEventRepository;
-
-// Find all bank file processing events
-List<AuditEvent> fileEvents = auditEventRepository
-    .findByEntityTypeAndServiceName("BANK_FILE", "reconciliation-service");
-
-// Find all board approval actions
-List<AuditEvent> approvalEvents = auditEventRepository
-    .findByActionContaining("BOARD_APPROVAL");
-```
-
-### Troubleshooting Audit Issues
-
-| Issue                      | Check                                                                                         |
-| -------------------------- | --------------------------------------------------------------------------------------------- |
-| Audit events not appearing | Verify `shared-lib.audit.enabled=true` in config                                              |
-| Entity audit not working   | Ensure `@EntityListeners(SharedEntityAuditListener.class)` on entity                          |
-| Permission denied errors   | Check database grants: `GRANT INSERT, SELECT ON audit.audit_event TO reconciliation_app_role` |
-| Hash chain broken          | Check logs for concurrent modifications; contact security team                                |
-
-### Testing Audit Logging
-
-```java
-@Test
-public void testBankFileProcessingAudit() {
-    // Perform action
-    BankFile file = reconciliationService.processBankFile(fileData);
-
-    // Verify audit event created
-    List<AuditEvent> events = auditEventRepository
-        .findByActionAndEntityId("BANK_FILE_PROCESSED", file.getId().toString());
-
-    assertThat(events).hasSize(1);
-    assertThat(events.get(0).getServiceName()).isEqualTo("reconciliation-service");
-    assertThat(events.get(0).getSourceSchema()).isEqualTo("reconciliation");
-}
-```
-
-### References
-
-- **Full Documentation:** `documentation/LBE/architecture/audit-design.md`
-- **Quick Reference:** `documentation/LBE/reference/audit-quick-reference.md`
-- **Configuration:** Review shared-lib audit properties in `application.yml`
+**Troubleshooting:** Check `shared-lib.audit.enabled=true` | Verify DB grants | See audit-design.md
 
 ## Building and Testing
 
